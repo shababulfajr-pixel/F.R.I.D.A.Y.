@@ -417,7 +417,7 @@
     },
     "InvestmentPosition": {
       "title": "InvestmentPosition",
-      "description": "A user's gold, cryptocurrency, or stock investment holding valued against live market prices.",
+      "description": "A user's gold, foreign currency (USD/FX), cryptocurrency, or stock investment holding valued against live market prices.",
       "type": "object",
       "properties": {
         "ownerId": {
@@ -429,7 +429,7 @@
         },
         "assetType": {
           "type": "string",
-          "enum": ["gold", "crypto", "stock"],
+          "enum": ["gold", "forex", "crypto", "stock"],
           "description": "Investment asset class."
         },
         "symbol": {

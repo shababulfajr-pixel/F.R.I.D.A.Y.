@@ -79,7 +79,7 @@ service cloud.firestore {
     }
 
     function isValidAssetType(val) {
-      return val is string && val.size() <= 10 && val in ['gold', 'crypto', 'stock'];
+      return val is string && val.size() <= 10 && val in ['gold', 'forex', 'crypto', 'stock'];
     }
 
     // --- Entity Validation Blueprints ---
