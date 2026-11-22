@@ -1,0 +1,543 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Reusable Hardened Primitives ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOptionalValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]*$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function hasValidParentProfile(userId) {
+      return get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+    }
+
+    // --- Allowed Enums (Synchronized with firebase-blueprint.json) ---
+    function isValidCurrency(val) {
+      return val is string && val.size() == 3 && val in ['THB', 'USD', 'EUR', 'JPY'];
+    }
+
+    function isValidPaymentMethod(val) {
+      return val is string && val.size() <= 20 && val in ['cash', 'bank_transfer', 'promptpay', 'credit_card', 'e_wallet'];
+    }
+
+    function isValidExpenseCategory(val) {
+      return val is string && val.size() <= 20 && val in [
+        'food', 'housing', 'debt', 'transport', 'utilities',
+        'health', 'shopping', 'entertainment', 'education', 'savings', 'other_expense'
+      ];
+    }
+
+    function isValidTransactionCategory(val, txType) {
+      return (
+        (txType == 'income' && val is string && val.size() <= 20 && val in ['salary', 'freelance', 'investment', 'other_income']) ||
+        (txType == 'expense' && isValidExpenseCategory(val))
+      );
+    }
+
+    function isValidAllocationPurpose(val) {
+      return val is string && val.size() <= 24 && val in [
+        'dorm_rent', 'debt_repayment', 'education', 'emergency_fund',
+        'insurance_tax', 'family_support', 'investment_goal', 'other_plan'
+      ];
+    }
+
+    function isValidAllocationStatus(val) {
+      return val is string && val.size() <= 16 && val in ['active', 'paused', 'completed'];
+    }
+
+    function isValidFrequency(val) {
+      return val is string && val.size() <= 12 && val in ['monthly', 'weekly', 'yearly'];
+    }
+
+    function isValidAssetType(val) {
+      return val is string && val.size() <= 10 && val in ['gold', 'crypto', 'stock'];
+    }
+
+    // --- Entity Validation Blueprints ---
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'email', 'currency',
+          'monthlyBudgetLimit', 'alertThresholdPercent', 'notificationsEnabled',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'email', 'currency',
+          'monthlyBudgetLimit', 'alertThresholdPercent', 'notificationsEnabled',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.uid == userId
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && isValidCurrency(data.currency)
+        && data.monthlyBudgetLimit is number && data.monthlyBudgetLimit >= 0 && data.monthlyBudgetLimit <= 1000000000
+        && data.alertThresholdPercent is number && data.alertThresholdPercent >= 50 && data.alertThresholdPercent <= 100
+        && data.notificationsEnabled is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTransaction(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'title', 'amount', 'type', 'category',
+          'date', 'monthKey', 'paymentMethod', 'note',
+          'allocationId', 'recurringId', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'title', 'amount', 'type', 'category',
+          'date', 'monthKey', 'paymentMethod', 'note',
+          'allocationId', 'recurringId', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
+        && data.amount is number && data.amount > 0 && data.amount <= 1000000000
+        && data.type is string && data.type.size() <= 10 && data.type in ['income', 'expense']
+        && isValidTransactionCategory(data.category, data.type)
+        && data.date is string && data.date.size() == 10 && data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^[0-9]{4}-[0-9]{2}$')
+        && data.monthKey == data.date[0:7]
+        && isValidPaymentMethod(data.paymentMethod)
+        && data.note is string && data.note.size() <= 400
+        && isOptionalValidId(data.allocationId)
+        && isOptionalValidId(data.recurringId)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCategoryBudget(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'category', 'monthlyLimit', 'warningThreshold', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'category', 'monthlyLimit', 'warningThreshold', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && isValidExpenseCategory(data.category)
+        && data.monthlyLimit is number && data.monthlyLimit > 0 && data.monthlyLimit <= 1000000000
+        && data.warningThreshold is number && data.warningThreshold >= 50 && data.warningThreshold <= 100
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAnnualAllocation(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'name', 'purpose', 'year', 'targetAnnualAmount',
+          'monthlyPlannedAmount', 'disbursedAmount', 'dueDay', 'status',
+          'note', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'name', 'purpose', 'year', 'targetAnnualAmount',
+          'monthlyPlannedAmount', 'disbursedAmount', 'dueDay', 'status',
+          'note', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && isValidAllocationPurpose(data.purpose)
+        && data.year is number && data.year >= 2020 && data.year <= 2100
+        && data.targetAnnualAmount is number && data.targetAnnualAmount > 0 && data.targetAnnualAmount <= 1000000000
+        && data.monthlyPlannedAmount is number && data.monthlyPlannedAmount >= 0 && data.monthlyPlannedAmount <= 1000000000
+        && data.disbursedAmount is number && data.disbursedAmount >= 0 && data.disbursedAmount <= 1000000000
+        && data.dueDay is number && data.dueDay >= 1 && data.dueDay <= 31
+        && isValidAllocationStatus(data.status)
+        && data.note is string && data.note.size() <= 400
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRecurringExpense(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'title', 'amount', 'category', 'paymentMethod',
+          'frequency', 'dueDay', 'isActive', 'lastLoggedMonth', 'note',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'title', 'amount', 'category', 'paymentMethod',
+          'frequency', 'dueDay', 'isActive', 'lastLoggedMonth', 'note',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 140
+        && data.amount is number && data.amount > 0 && data.amount <= 1000000000
+        && isValidExpenseCategory(data.category)
+        && isValidPaymentMethod(data.paymentMethod)
+        && isValidFrequency(data.frequency)
+        && data.dueDay is number && data.dueDay >= 1 && data.dueDay <= 31
+        && data.isActive is bool
+        && data.lastLoggedMonth is string && data.lastLoggedMonth.size() <= 7 && data.lastLoggedMonth.matches('^$|^([0-9]{4}-[0-9]{2})$')
+        && data.note is string && data.note.size() <= 400
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidInvestmentPosition(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'assetType', 'symbol', 'assetName', 'investedAmount',
+          'entryPriceThb', 'units', 'purchaseDate', 'note', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'assetType', 'symbol', 'assetName', 'investedAmount',
+          'entryPriceThb', 'units', 'purchaseDate', 'note', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && isValidAssetType(data.assetType)
+        && data.symbol is string && data.symbol.size() >= 1 && data.symbol.size() <= 20 && data.symbol.matches('^[A-Z0-9.=^\\-]+$')
+        && data.assetName is string && data.assetName.size() >= 1 && data.assetName.size() <= 120
+        && data.investedAmount is number && data.investedAmount > 0 && data.investedAmount <= 1000000000
+        && data.entryPriceThb is number && data.entryPriceThb > 0 && data.entryPriceThb <= 1000000000
+        && data.units is number && data.units > 0 && data.units <= 1000000000
+        && data.purchaseDate is string && data.purchaseDate.size() == 10 && data.purchaseDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.note is string && data.note.size() <= 400
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // --- Collection Match Rules ---
+    match /users/{userId} {
+      // Strict PII isolation: no list allowed on /users
+      allow get: if isSignedIn() && isValidId(userId) && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Update budget & alert preferences
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'monthlyBudgetLimit', 'alertThresholdPercent', 'notificationsEnabled', 'currency', 'displayName', 'updatedAt'
+          ]) ||
+          // Action: Sync Google profile identity info
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName', 'email', 'updatedAt'
+          ])
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(userId) && isOwner(userId);
+
+      // --- Transactions Subcollection ---
+      match /transactions/{transactionId} {
+        allow get: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(transactionId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && hasValidParentProfile(userId);
+
+        allow list: if isSignedIn()
+          && isValidId(userId)
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(transactionId)
+          && isOwner(userId)
+          && isValidTransaction(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasValidParentProfile(userId)
+          && (
+            incoming().allocationId == '' ||
+            exists(/databases/$(database)/documents/users/$(userId)/allocations/$(incoming().allocationId))
+          )
+          && (
+            incoming().recurringId == '' ||
+            exists(/databases/$(database)/documents/users/$(userId)/recurring/$(incoming().recurringId))
+          );
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(transactionId)
+          && isOwner(userId)
+          && isValidTransaction(incoming(), userId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && hasValidParentProfile(userId)
+          && (
+            // Action: Edit transaction details
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'amount', 'type', 'category', 'date', 'monthKey',
+              'paymentMethod', 'note', 'allocationId', 'recurringId', 'updatedAt'
+            ])
+          )
+          && (
+            incoming().allocationId == '' ||
+            exists(/databases/$(database)/documents/users/$(userId)/allocations/$(incoming().allocationId))
+          )
+          && (
+            incoming().recurringId == '' ||
+            exists(/databases/$(database)/documents/users/$(userId)/recurring/$(incoming().recurringId))
+          );
+
+        allow delete: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(transactionId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && hasValidParentProfile(userId);
+      }
+
+      // --- Category Budgets Subcollection ---
+      match /budgets/{budgetId} {
+        allow get: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(budgetId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && hasValidParentProfile(userId);
+
+        allow list: if isSignedIn()
+          && isValidId(userId)
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(budgetId)
+          && isOwner(userId)
+          && isValidCategoryBudget(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasValidParentProfile(userId);
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(budgetId)
+          && isOwner(userId)
+          && isValidCategoryBudget(incoming(), userId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().category == existing().category
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && hasValidParentProfile(userId)
+          && (
+            // Action: Adjust category budget ceiling & threshold
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'monthlyLimit', 'warningThreshold', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(budgetId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && hasValidParentProfile(userId);
+      }
+
+      // --- Annual Allocations / Disbursement Plans Subcollection ---
+      match /allocations/{allocationId} {
+        allow get: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(allocationId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && hasValidParentProfile(userId);
+
+        allow list: if isSignedIn()
+          && isValidId(userId)
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(allocationId)
+          && isOwner(userId)
+          && isValidAnnualAllocation(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasValidParentProfile(userId);
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(allocationId)
+          && isOwner(userId)
+          && isValidAnnualAllocation(incoming(), userId)
+          && existing().ownerId == request.auth.uid
+          && existing().status != 'completed'
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && hasValidParentProfile(userId)
+          && (
+            // Action: Record disbursement installment
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'disbursedAmount', 'status', 'updatedAt'
+            ]) ||
+            // Action: Edit allocation plan settings
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'purpose', 'year', 'targetAnnualAmount', 'monthlyPlannedAmount',
+              'dueDay', 'status', 'note', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(allocationId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && hasValidParentProfile(userId);
+      }
+
+      // --- Recurring Expenses Subcollection ---
+      match /recurring/{recurringId} {
+        allow get: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(recurringId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && hasValidParentProfile(userId);
+
+        allow list: if isSignedIn()
+          && isValidId(userId)
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(recurringId)
+          && isOwner(userId)
+          && isValidRecurringExpense(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasValidParentProfile(userId);
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(recurringId)
+          && isOwner(userId)
+          && isValidRecurringExpense(incoming(), userId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && hasValidParentProfile(userId)
+          && (
+            // Action: Mark logged for current billing month
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'lastLoggedMonth', 'updatedAt'
+            ]) ||
+            // Action: Toggle active reminder state
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'isActive', 'updatedAt'
+            ]) ||
+            // Action: Edit recurring bill details
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'amount', 'category', 'paymentMethod',
+              'frequency', 'dueDay', 'isActive', 'note', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(recurringId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && hasValidParentProfile(userId);
+      }
+
+      // --- Investments Subcollection (Gold, Crypto, Stocks) ---
+      match /investments/{investmentId} {
+        allow get: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(investmentId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && hasValidParentProfile(userId);
+
+        allow list: if isSignedIn()
+          && isValidId(userId)
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(investmentId)
+          && isOwner(userId)
+          && isValidInvestmentPosition(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasValidParentProfile(userId);
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(investmentId)
+          && isOwner(userId)
+          && isValidInvestmentPosition(incoming(), userId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().assetType == existing().assetType
+          && incoming().symbol == existing().symbol
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && hasValidParentProfile(userId)
+          && (
+            // Action: Edit investment holding details
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'assetName', 'investedAmount', 'entryPriceThb', 'units', 'purchaseDate', 'note', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(investmentId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && hasValidParentProfile(userId);
+      }
+    }
+  }
+}

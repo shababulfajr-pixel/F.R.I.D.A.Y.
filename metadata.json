@@ -1,0 +1,6 @@
+{
+  "name": "Adam-Smith",
+  "description": "Personal finance and accounting workspace with real-time Firebase sync, offline mode, monthly trend analytics, budget ceiling alerts, annual disbursement planning, and recurring expense tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
