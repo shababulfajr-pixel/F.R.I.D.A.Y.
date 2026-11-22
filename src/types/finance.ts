@@ -49,7 +49,7 @@ export type AppSection =
   | 'budgets'
   | 'reports';
 
-export type AssetType = 'gold' | 'crypto' | 'stock';
+export type AssetType = 'gold' | 'forex' | 'crypto' | 'stock';
 
 export interface InvestmentPositionRecord {
   id: string;
@@ -281,21 +281,20 @@ export const CURRENCIES: { value: CurrencyCode; symbol: string; label: string }[
 
 export const ASSET_TYPE_META: Record<AssetType, { label: string; color: string }> = {
   gold: { label: 'ทองคำ', color: '#D97706' },
-  crypto: { label: 'คริปโท', color: '#7C3AED' },
+  forex: { label: 'ดอลลาร์ / ค่าเงิน', color: '#16A34A' },
   stock: { label: 'หุ้น', color: '#0071E3' },
+  crypto: { label: 'คริปโท', color: '#7C3AED' },
 };
 
 export const MARKET_CATALOG: CatalogAsset[] = [
   // Gold
   { symbol: 'GOLD-THB', shortLabel: 'ทองคำ 96.5%', name: 'ทองคำแท่ง 96.5% (ต่อบาททอง)', assetType: 'gold', unitLabel: 'บาททอง', color: '#D97706' },
-  { symbol: 'GC=F', shortLabel: 'Gold Spot', name: 'Gold Futures Spot (XAU / oz)', assetType: 'gold', unitLabel: 'ออนซ์', color: '#CA8A04' },
-  // Crypto
-  { symbol: 'BTC-USD', shortLabel: 'BTC', name: 'Bitcoin (BTC)', assetType: 'crypto', unitLabel: 'BTC', color: '#F59E0B' },
-  { symbol: 'ETH-USD', shortLabel: 'ETH', name: 'Ethereum (ETH)', assetType: 'crypto', unitLabel: 'ETH', color: '#6366F1' },
-  { symbol: 'SOL-USD', shortLabel: 'SOL', name: 'Solana (SOL)', assetType: 'crypto', unitLabel: 'SOL', color: '#14B8A6' },
-  { symbol: 'BNB-USD', shortLabel: 'BNB', name: 'BNB (BNB)', assetType: 'crypto', unitLabel: 'BNB', color: '#EAB308' },
-  { symbol: 'XRP-USD', shortLabel: 'XRP', name: 'XRP (XRP)', assetType: 'crypto', unitLabel: 'XRP', color: '#0284C7' },
-  { symbol: 'DOGE-USD', shortLabel: 'DOGE', name: 'Dogecoin (DOGE)', assetType: 'crypto', unitLabel: 'DOGE', color: '#D97706' },
+  { symbol: 'GC=F', shortLabel: 'Gold Spot', name: 'Gold Spot ตลาดโลก (XAU / oz)', assetType: 'gold', unitLabel: 'ออนซ์', color: '#CA8A04' },
+  // Dollar & Forex
+  { symbol: 'USD-THB', shortLabel: 'USD / THB', name: 'ดอลลาร์สหรัฐ (USD / บาท)', assetType: 'forex', unitLabel: 'ดอลลาร์', color: '#16A34A' },
+  { symbol: 'DXY', shortLabel: 'DXY Index', name: 'ดัชนีดอลลาร์สหรัฐ (US Dollar Index)', assetType: 'forex', unitLabel: 'จุด', color: '#059669' },
+  { symbol: 'EUR-THB', shortLabel: 'EUR / THB', name: 'ยูโร (EUR / บาท)', assetType: 'forex', unitLabel: 'ยูโร', color: '#0284C7' },
+  { symbol: 'JPY-THB', shortLabel: 'JPY / THB', name: 'เยนญี่ปุ่น (JPY / บาท)', assetType: 'forex', unitLabel: 'เยน', color: '#0D9488' },
   // US & Global Stocks / ETFs
   { symbol: 'AAPL', shortLabel: 'AAPL', name: 'Apple Inc. (AAPL)', assetType: 'stock', unitLabel: 'หุ้น', color: '#0071E3' },
   { symbol: 'NVDA', shortLabel: 'NVDA', name: 'NVIDIA Corp. (NVDA)', assetType: 'stock', unitLabel: 'หุ้น', color: '#16A34A' },
@@ -310,7 +309,57 @@ export const MARKET_CATALOG: CatalogAsset[] = [
   { symbol: 'DELTA.BK', shortLabel: 'DELTA', name: 'เดลต้า อีเลคโทรนิคส์ (DELTA.BK)', assetType: 'stock', unitLabel: 'หุ้น', color: '#0891B2' },
   { symbol: 'SCB.BK', shortLabel: 'SCB', name: 'เอสซีบี เอกซ์ (SCB.BK)', assetType: 'stock', unitLabel: 'หุ้น', color: '#7C3AED' },
   { symbol: 'CPALL.BK', shortLabel: 'CPALL', name: 'ซีพี ออลล์ (CPALL.BK)', assetType: 'stock', unitLabel: 'หุ้น', color: '#16A34A' },
+  // Crypto
+  { symbol: 'BTC-USD', shortLabel: 'BTC', name: 'Bitcoin (BTC)', assetType: 'crypto', unitLabel: 'BTC', color: '#F59E0B' },
+  { symbol: 'ETH-USD', shortLabel: 'ETH', name: 'Ethereum (ETH)', assetType: 'crypto', unitLabel: 'ETH', color: '#6366F1' },
+  { symbol: 'SOL-USD', shortLabel: 'SOL', name: 'Solana (SOL)', assetType: 'crypto', unitLabel: 'SOL', color: '#14B8A6' },
+  { symbol: 'BNB-USD', shortLabel: 'BNB', name: 'BNB (BNB)', assetType: 'crypto', unitLabel: 'BNB', color: '#EAB308' },
+  { symbol: 'XRP-USD', shortLabel: 'XRP', name: 'XRP (XRP)', assetType: 'crypto', unitLabel: 'XRP', color: '#0284C7' },
+  { symbol: 'DOGE-USD', shortLabel: 'DOGE', name: 'Dogecoin (DOGE)', assetType: 'crypto', unitLabel: 'DOGE', color: '#D97706' },
 ];
+
+export function normalizeMarketQuery(raw: string): { symbol: string; assetType?: AssetType } {
+  const trimmed = raw.trim();
+  const upper = trimmed.toUpperCase();
+
+  // Thai keyword shortcuts
+  if (/ดอลล/.test(trimmed) || ['USD', 'USDTHB', 'USD/THB', 'USDTHB=X', 'DOLLAR', 'THB=X'].includes(upper)) {
+    return { symbol: 'USD-THB', assetType: 'forex' };
+  }
+  if (['DXY', 'USDX', 'DX-Y.NYB'].includes(upper)) {
+    return { symbol: 'DXY', assetType: 'forex' };
+  }
+  if (/ยูโร/.test(trimmed) || ['EUR', 'EURTHB', 'EUR/THB', 'EURTHB=X'].includes(upper)) {
+    return { symbol: 'EUR-THB', assetType: 'forex' };
+  }
+  if (/เยน/.test(trimmed) || ['JPY', 'JPYTHB', 'JPY/THB', 'JPYTHB=X'].includes(upper)) {
+    return { symbol: 'JPY-THB', assetType: 'forex' };
+  }
+  if (/ทอง/.test(trimmed) || ['GOLD', 'GOLD-THB', 'XAU-THB'].includes(upper)) {
+    return { symbol: 'GOLD-THB', assetType: 'gold' };
+  }
+  if (['XAU', 'XAUUSD', 'XAU/USD', 'XAU-USD', 'GOLD-USD', 'GC=F'].includes(upper)) {
+    return { symbol: 'GC=F', assetType: 'gold' };
+  }
+  if (['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE'].includes(upper)) {
+    return { symbol: `${upper}-USD`, assetType: 'crypto' };
+  }
+
+  const normalized = upper.replace(/\//g, '-');
+  const catalogMatch = MARKET_CATALOG.find(
+    (a) => a.symbol === normalized || a.shortLabel.toUpperCase() === normalized
+  );
+  if (catalogMatch) {
+    return { symbol: catalogMatch.symbol, assetType: catalogMatch.assetType };
+  }
+  if (normalized.endsWith('-USD')) {
+    return { symbol: normalized, assetType: 'crypto' };
+  }
+  if (normalized.endsWith('-THB')) {
+    return { symbol: normalized, assetType: 'forex' };
+  }
+  return { symbol: normalized, assetType: 'stock' };
+}
 
 export function getCatalogAsset(symbol: string): CatalogAsset | undefined {
   return MARKET_CATALOG.find((a) => a.symbol === symbol);
@@ -320,6 +369,7 @@ export function getAssetUnitLabel(symbol: string, assetType: AssetType): string 
   const found = getCatalogAsset(symbol);
   if (found) return found.unitLabel;
   if (assetType === 'gold') return 'บาททอง';
+  if (assetType === 'forex') return symbol.replace('-THB', '') || 'USD';
   if (assetType === 'crypto') return symbol.replace('-USD', '');
   return 'หุ้น';
 }

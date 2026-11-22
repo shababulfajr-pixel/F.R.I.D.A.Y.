@@ -41,6 +41,7 @@ import {
   getCatalogAsset,
   getTodayISO,
   MARKET_CATALOG,
+  normalizeMarketQuery,
   type AssetType,
   type InvestmentPositionRecord,
   type MarketChartData,
@@ -58,8 +59,9 @@ const CHART_RANGES: { id: ChartRange; label: string }[] = [
 
 const ASSET_TABS: { id: AssetType; label: string }[] = [
   { id: 'gold', label: 'ทองคำ' },
-  { id: 'crypto', label: 'คริปโท' },
+  { id: 'forex', label: 'ดอลลาร์ / ค่าเงิน' },
   { id: 'stock', label: 'หุ้น' },
+  { id: 'crypto', label: 'คริปโท' },
 ];
 
 function formatUnits(units: number): string {
@@ -69,13 +71,24 @@ function formatUnits(units: number): string {
   return units.toLocaleString('th-TH', { maximumFractionDigits: 6 });
 }
 
+function formatMarketPrice(price: number, symbol: string, compact = false): string {
+  if (!Number.isFinite(price) || price <= 0) return '—';
+  if (symbol === 'DXY') {
+    return `${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} จุด`;
+  }
+  if (price < 5) {
+    return `฿${price.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+  }
+  return formatCurrency(price, 'THB', compact);
+}
+
 function formatUpdatedTime(iso: string | null): string {
-  if (!iso) return 'ราคาล่าสุดจากแคช';
+  if (!iso) return 'ยังไม่ได้ดึงราคา · กดปุ่มเพื่อดึงราคาล่าสุด';
   try {
     const d = new Date(iso);
-    return `อัปเดต ${d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.`;
+    return `ดึงราคาล่าสุด ${d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.`;
   } catch {
-    return 'ราคาล่าสุด';
+    return 'ราคาล่าสุดที่ดึงไว้';
   }
 }
 
@@ -107,8 +120,10 @@ export function InvestmentsView() {
   const [chartData, setChartData] = useState<MarketChartData | null>(null);
   const [chartLoading, setChartLoading] = useState<boolean>(false);
   const [chartError, setChartError] = useState<string | null>(null);
+  const [chartReloadNonce, setChartReloadNonce] = useState<number>(0);
 
   const [customTickerInput, setCustomTickerInput] = useState<string>('');
+  const [refreshingHoldingId, setRefreshingHoldingId] = useState<string | null>(null);
 
   // Modal state
   const [modalOpen, setModalOpen] = useState<boolean>(false);
@@ -137,7 +152,7 @@ export function InvestmentsView() {
     [formAssetType]
   );
 
-  // Load chart whenever activeSymbol or chartRange changes
+  // Load chart on-demand whenever activeSymbol, chartRange, or manual reload changes
   useEffect(() => {
     let cancelled = false;
     setChartLoading(true);
@@ -161,27 +176,74 @@ export function InvestmentsView() {
     return () => {
       cancelled = true;
     };
-  }, [activeSymbol, chartRange]);
+  }, [activeSymbol, chartRange, chartReloadNonce]);
+
+  // On-demand manual snapshot refresh (no automatic real-time polling)
+  const handleManualSnapshotRefresh = async (extraSymbols: string[] = []) => {
+    const heldSymbols = investments.map((i) => i.symbol);
+    const result = await refreshMarketQuotes([activeSymbol, ...heldSymbols, ...extraSymbols]);
+    const updatedCount = Object.keys(result).length;
+    setChartReloadNonce((n) => n + 1);
+    if (updatedCount > 0) {
+      pushToast({
+        title: 'ดึงราคาตลาดล่าสุดเรียบร้อย',
+        description: `อัปเดตราคาสินทรัพย์ ${updatedCount} รายการ ณ เวลานี้แล้ว`,
+        tone: 'success',
+      });
+    } else {
+      pushToast({
+        title: 'ไม่สามารถดึงราคาตลาดได้ในขณะนี้',
+        description: 'แสดงราคาล่าสุดจากแคช กรุณากดลองใหม่อีกครั้ง',
+        tone: 'warning',
+      });
+    }
+  };
+
+  const handleRefreshSingleHolding = async (item: InvestmentPositionRecord) => {
+    setRefreshingHoldingId(item.id);
+    try {
+      const normalized = normalizeMarketQuery(item.symbol).symbol;
+      const result = await refreshMarketQuotes([item.symbol, normalized]);
+      const q = result[item.symbol] || result[normalized];
+      if (q && q.priceThb > 0) {
+        pushToast({
+          title: `อัปเดตราคา ${item.assetName} แล้ว`,
+          description: `ราคาล่าสุด ${formatMarketPrice(q.priceThb, item.symbol)}`,
+          tone: 'success',
+        });
+      } else {
+        pushToast({
+          title: `ไม่พบราคาตลาดสำหรับ ${item.symbol}`,
+          description: 'ตรวจสอบสัญลักษณ์สินทรัพย์ หรือแก้ไขราคาด้วยตนเองได้',
+          tone: 'warning',
+        });
+      }
+    } finally {
+      setRefreshingHoldingId(null);
+    }
+  };
 
   const handleSelectAssetTab = (tab: AssetType) => {
     setActiveAssetTab(tab);
     const first = MARKET_CATALOG.find((a) => a.assetType === tab);
     if (first) {
       setActiveSymbol(first.symbol);
-      void refreshMarketQuotes(MARKET_CATALOG.filter((a) => a.assetType === tab).map((a) => a.symbol));
     }
   };
 
   const handleSearchCustomTicker = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = customTickerInput.trim().toUpperCase();
+    const { symbol: cleaned, assetType: guessedType } = normalizeMarketQuery(customTickerInput);
     if (!cleaned || !BLUEPRINT_LIMITS.SYMBOL_PATTERN.test(cleaned)) {
       pushToast({
         title: 'สัญลักษณ์ไม่ถูกต้อง',
-        description: 'ตัวอย่างเช่น AAPL, NVDA, PTT.BK, BTC-USD, ETH-USD',
+        description: 'ตัวอย่างเช่น ดอลลาร์, USD-THB, ทองคำ, AAPL, PTT.BK, BTC-USD',
         tone: 'warning',
       });
       return;
+    }
+    if (guessedType) {
+      setActiveAssetTab(guessedType);
     }
     setActiveSymbol(cleaned);
     await refreshMarketQuotes([cleaned]);
@@ -225,33 +287,41 @@ export function InvestmentsView() {
     setModalOpen(true);
   };
 
-  const handleLookupPriceForForm = async (sym: string, dateStr: string) => {
-    const cleanSym = sym.trim().toUpperCase();
-    if (!cleanSym || !BLUEPRINT_LIMITS.SYMBOL_PATTERN.test(cleanSym)) return;
+  const handleLookupPriceForForm = async (sym: string, dateStr: string, forceCurrent = false) => {
+    const { symbol: cleanSym } = normalizeMarketQuery(sym);
+    if (!cleanSym || !BLUEPRINT_LIMITS.SYMBOL_PATTERN.test(cleanSym)) {
+      setFormError('กรุณาระบุสัญลักษณ์สินทรัพย์ที่ถูกต้องก่อนกดดึงราคา');
+      return;
+    }
+    if (cleanSym !== sym.trim().toUpperCase() && !editingItem) {
+      setFormSymbol(cleanSym);
+    }
     setFetchingPrice(true);
     setFormError(null);
     try {
-      if (dateStr === getTodayISO()) {
+      if (forceCurrent || dateStr === getTodayISO()) {
         const res = await refreshMarketQuotes([cleanSym]);
         const quote = res[cleanSym] || marketQuotes[cleanSym];
         if (quote && quote.priceThb > 0) {
-          setFormEntryPriceThb(String(Number(quote.priceThb.toFixed(2))));
+          setFormEntryPriceThb(String(Number(quote.priceThb.toFixed(quote.priceThb < 5 ? 4 : 2))));
           return;
         }
       }
       const hist = await fetchHistoricalPriceOnDate(cleanSym, dateStr);
       if (hist.priceThb > 0) {
-        setFormEntryPriceThb(String(Number(hist.priceThb.toFixed(2))));
+        setFormEntryPriceThb(String(Number(hist.priceThb.toFixed(hist.priceThb < 5 ? 4 : 2))));
+        return;
       }
+      throw new Error('ไม่พบราคาตลาดของสัญลักษณ์นี้');
     } catch (err) {
       const fallbackLive = marketQuotes[cleanSym]?.priceThb;
       if (fallbackLive && fallbackLive > 0) {
-        setFormEntryPriceThb(String(Number(fallbackLive.toFixed(2))));
+        setFormEntryPriceThb(String(Number(fallbackLive.toFixed(fallbackLive < 5 ? 4 : 2))));
       } else {
         setFormError(
           err instanceof Error
             ? err.message
-            : 'ไม่สามารถดึงราคาตลาดอัตโนมัติได้ สามารถกรอกราคาต่อหน่วยเองได้'
+            : 'ไม่สามารถดึงราคาตลาดได้ สามารถกรอกราคาต่อหน่วยเองได้'
         );
       }
     } finally {
@@ -299,12 +369,12 @@ export function InvestmentsView() {
     if (!user) return;
     setFormError(null);
 
-    const cleanSym = formSymbol.trim().toUpperCase();
+    const { symbol: cleanSym } = normalizeMarketQuery(formSymbol);
     const amountNum = Number(formInvestedAmount);
     const entryNum = Number(formEntryPriceThb);
 
     if (!cleanSym || !BLUEPRINT_LIMITS.SYMBOL_PATTERN.test(cleanSym)) {
-      setFormError('กรุณาระบุสัญลักษณ์สินทรัพย์ที่ถูกต้อง (เช่น GOLD-THB, BTC-USD, AAPL)');
+      setFormError('กรุณาระบุสัญลักษณ์สินทรัพย์ที่ถูกต้อง (เช่น GOLD-THB, USD-THB, AAPL, BTC-USD)');
       return;
     }
     if (!Number.isFinite(amountNum) || amountNum <= 0) {
@@ -374,10 +444,11 @@ export function InvestmentsView() {
     }
   };
 
-  // Enriched holdings with live market valuation
+  // Enriched holdings with snapshot market valuation
   const valuedHoldings = useMemo(() => {
     return investments.map((inv) => {
-      const quote = marketQuotes[inv.symbol];
+      const normSym = normalizeMarketQuery(inv.symbol).symbol;
+      const quote = marketQuotes[inv.symbol] || marketQuotes[normSym];
       const livePriceThb = quote?.priceThb ?? inv.entryPriceThb;
       const currentValue = inv.units * livePriceThb;
       const profitThb = currentValue - inv.investedAmount;
@@ -398,12 +469,12 @@ export function InvestmentsView() {
 
   // Portfolio allocation breakdown by assetType
   const allocationByType = useMemo(() => {
-    const totals: Record<AssetType, number> = { gold: 0, crypto: 0, stock: 0 };
+    const totals: Record<AssetType, number> = { gold: 0, forex: 0, stock: 0, crypto: 0 };
     for (const h of valuedHoldings) {
-      totals[h.assetType] += h.currentValue;
+      totals[h.assetType] = (totals[h.assetType] || 0) + h.currentValue;
     }
-    const grandTotal = totals.gold + totals.crypto + totals.stock;
-    return (['gold', 'crypto', 'stock'] as AssetType[])
+    const grandTotal = totals.gold + totals.forex + totals.stock + totals.crypto;
+    return (['gold', 'forex', 'stock', 'crypto'] as AssetType[])
       .map((type) => ({
         type,
         name: ASSET_TYPE_META[type].label,
@@ -443,7 +514,7 @@ export function InvestmentsView() {
           <div className="lg:col-span-8 space-y-6">
             <div className="space-y-1.5">
               <div className="flex flex-wrap items-center gap-2 text-[13px] font-medium text-[#6E6E73] dark:text-[#A1A1A6]">
-                <span>มูลค่าพอร์ตลงทุนปัจจุบัน (ทองคำ · คริปโท · หุ้น)</span>
+                <span>มูลค่าพอร์ตลงทุน (ทองคำ · ดอลลาร์ · หุ้น · คริปโท)</span>
                 <span aria-hidden="true">·</span>
                 <span className="font-mono-num">{formatUpdatedTime(marketUpdatedAt)}</span>
               </div>
@@ -521,11 +592,11 @@ export function InvestmentsView() {
               <button
                 type="button"
                 disabled={marketLoading}
-                onClick={() => void refreshMarketQuotes([activeSymbol])}
+                onClick={() => void handleManualSnapshotRefresh()}
                 className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-full apple-glass hover:bg-white/90 dark:hover:bg-white/10 disabled:opacity-60 text-xs font-medium text-[#1D1D1F] dark:text-[#F5F5F7] transition-colors cursor-pointer whitespace-nowrap"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${marketLoading ? 'animate-spin' : ''}`} />
-                อัปเดตราคา
+                {marketLoading ? 'กำลังดึงราคา...' : 'ดึงราคาล่าสุด'}
               </button>
             </div>
           </div>
@@ -555,13 +626,13 @@ export function InvestmentsView() {
 
           {/* Custom Ticker Search */}
           <form onSubmit={handleSearchCustomTicker} className="flex items-center gap-2 w-full lg:w-auto">
-            <div className="relative flex-1 lg:w-64">
+            <div className="relative flex-1 lg:w-72">
               <Search className="w-3.5 h-3.5 text-[#86868B] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 value={customTickerInput}
                 onChange={(e) => setCustomTickerInput(e.target.value)}
-                placeholder="ค้นหาสัญลักษณ์ เช่น AAPL, PTT.BK, BTC-USD"
+                placeholder="ค้นหา เช่น ดอลลาร์, ทองคำ, AAPL, PTT.BK, BTC"
                 className="w-full pl-9 pr-3 py-2 rounded-full bg-black/[0.04] dark:bg-white/[0.08] border border-black/[0.06] dark:border-white/[0.1] text-xs text-[#1D1D1F] dark:text-white placeholder:text-[#86868B] focus:outline-none focus:ring-2 focus:ring-[#0071E3]/40"
               />
             </div>
@@ -609,7 +680,7 @@ export function InvestmentsView() {
                   )}
                 </div>
                 <div className="text-[11px] font-mono-num text-[#6E6E73] dark:text-[#A1A1A6] mt-0.5">
-                  {q ? formatCurrency(q.priceThb, 'THB') : 'กำลังดึงราคา...'}
+                  {q ? formatMarketPrice(q.priceThb, asset.symbol) : 'กดดึงราคาล่าสุด'}
                 </div>
               </button>
             );
@@ -629,7 +700,7 @@ export function InvestmentsView() {
 
             <div className="flex flex-wrap items-baseline gap-3">
               <span className="text-3xl sm:text-4xl font-semibold font-mono-num tracking-[-0.03em] text-[#1D1D1F] dark:text-white">
-                {displayPriceThb > 0 ? formatCurrency(displayPriceThb, 'THB') : '—'}
+                {displayPriceThb > 0 ? formatMarketPrice(displayPriceThb, activeSymbol) : '—'}
               </span>
               {displayPriceThb > 0 && (
                 <span
@@ -652,11 +723,12 @@ export function InvestmentsView() {
 
             {chartData && chartData.symbol === activeSymbol && (
               <div className="flex flex-wrap items-center gap-4 text-xs text-[#6E6E73] dark:text-[#A1A1A6] font-mono-num pt-0.5">
-                <span>สูงสุด {formatCurrency(chartData.highThb, 'THB')}</span>
-                <span>ต่ำสุด {formatCurrency(chartData.lowThb, 'THB')}</span>
-                {chartData.nativeCurrency === 'USD' && (
+                <span>สูงสุด {formatMarketPrice(chartData.highThb, activeSymbol)}</span>
+                <span>ต่ำสุด {formatMarketPrice(chartData.lowThb, activeSymbol)}</span>
+                {(chartData.nativeCurrency === 'USD' || chartData.nativeCurrency === 'USD/oz') && (
                   <span>
                     ราคาตลาดโลก ${chartData.priceNative.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                    {chartData.nativeCurrency === 'USD/oz' ? '/oz' : ''}
                   </span>
                 )}
               </div>
@@ -704,14 +776,14 @@ export function InvestmentsView() {
               <p>{chartError || 'ยังไม่มีข้อมูลกราฟสำหรับสัญลักษณ์นี้'}</p>
               <button
                 type="button"
-                onClick={() => setChartRange(chartRange)}
+                onClick={() => setChartReloadNonce((n) => n + 1)}
                 className="text-[#0071E3] dark:text-[#0A84FF] font-medium hover:underline cursor-pointer"
               >
                 ลองโหลดใหม่อีกครั้ง
               </button>
             </div>
           ) : (
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <AreaChart data={chartData.series} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="fridayMarketGrad" x1="0" y1="0" x2="0" y2="1">
@@ -736,8 +808,8 @@ export function InvestmentsView() {
                   tick={{ fontSize: 11, fill: isDark ? '#A1A1A6' : '#6E6E73' }}
                   axisLine={false}
                   tickLine={false}
-                  tickFormatter={(v) => formatCurrency(Number(v), 'THB', true)}
-                  width={68}
+                  tickFormatter={(v) => formatMarketPrice(Number(v), activeSymbol, true)}
+                  width={72}
                 />
                 <Tooltip
                   contentStyle={{
@@ -748,7 +820,10 @@ export function InvestmentsView() {
                     backdropFilter: 'blur(20px)',
                     color: isDark ? '#F5F5F7' : '#1D1D1F',
                   }}
-                  formatter={(val) => [formatCurrency(Number(val ?? 0), 'THB'), 'ราคา (บาท)']}
+                  formatter={(val) => [
+                    formatMarketPrice(Number(val ?? 0), activeSymbol),
+                    activeSymbol === 'DXY' ? 'ดัชนี DXY' : 'ราคา (บาท)',
+                  ]}
                   labelFormatter={(label) => `ช่วงเวลา: ${String(label ?? '')}`}
                 />
                 <Area
@@ -774,17 +849,30 @@ export function InvestmentsView() {
                 รายการลงทุนของฉัน ({valuedHoldings.length})
               </h2>
               <p className="text-xs text-[#6E6E73] dark:text-[#A1A1A6] mt-0.5">
-                มูลค่าปัจจุบันคำนวณอัตโนมัติตามราคาตลาดวันนี้ และรวมเข้ายอดเงินออมสุทธิทันที
+                กดปุ่มดึงราคาเพื่ออัปเดตมูลค่า ณ เวลานี้ และสรุปรวมเข้ายอดเงินออมสุทธิทันที
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => openAddModal()}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white text-xs font-medium transition-colors cursor-pointer whitespace-nowrap"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              บันทึกการลงทุน
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {valuedHoldings.length > 0 && (
+                <button
+                  type="button"
+                  disabled={marketLoading}
+                  onClick={() => void handleManualSnapshotRefresh()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-full apple-glass hover:bg-white/90 dark:hover:bg-white/10 disabled:opacity-60 text-xs font-medium text-[#1D1D1F] dark:text-[#F5F5F7] transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${marketLoading ? 'animate-spin' : ''}`} />
+                  ดึงราคาทั้งพอร์ต
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => openAddModal()}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white text-xs font-medium transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                บันทึกการลงทุน
+              </button>
+            </div>
           </div>
 
           {valuedHoldings.length === 0 ? (
@@ -902,6 +990,18 @@ export function InvestmentsView() {
                           <>
                             <button
                               type="button"
+                              disabled={refreshingHoldingId === item.id}
+                              onClick={() => void handleRefreshSingleHolding(item)}
+                              aria-label="ดึงราคาล่าสุดของรายการนี้"
+                              title="ดึงราคา ณ เวลานี้"
+                              className="p-2 rounded-full text-[#0071E3] dark:text-[#0A84FF] hover:bg-[#0071E3]/10 transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              <RefreshCw
+                                className={`w-3.5 h-3.5 ${refreshingHoldingId === item.id ? 'animate-spin' : ''}`}
+                              />
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => openEditModal(item)}
                               aria-label="แก้ไขรายการลงทุน"
                               className="p-2 rounded-full text-[#6E6E73] dark:text-[#A1A1A6] hover:bg-black/[0.05] dark:hover:bg-white/[0.08] hover:text-[#1D1D1F] dark:hover:text-white transition-colors cursor-pointer"
@@ -934,7 +1034,7 @@ export function InvestmentsView() {
               สัดส่วนสินทรัพย์ในพอร์ต
             </h2>
             <p className="text-xs text-[#6E6E73] dark:text-[#A1A1A6] mt-0.5">
-              กระจายความเสี่ยงระหว่างทองคำ คริปโท และหุ้น
+              กระจายความเสี่ยงระหว่างทองคำ ดอลลาร์ หุ้น และคริปโท
             </p>
           </div>
 
@@ -945,7 +1045,7 @@ export function InvestmentsView() {
           ) : (
             <>
               <div className="h-44 w-full">
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" minWidth={0}>
                   <PieChart>
                     <Pie
                       data={allocationByType}
@@ -1035,14 +1135,14 @@ export function InvestmentsView() {
                 <label className="block text-xs font-medium text-[#6E6E73] dark:text-[#A1A1A6]">
                   ประเภทสินทรัพย์
                 </label>
-                <div className="grid grid-cols-3 gap-1 p-1 rounded-full bg-black/[0.05] dark:bg-white/[0.08]">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 p-1 rounded-2xl sm:rounded-full bg-black/[0.05] dark:bg-white/[0.08]">
                   {ASSET_TABS.map((tab) => (
                     <button
                       key={tab.id}
                       type="button"
                       disabled={Boolean(editingItem)}
                       onClick={() => handleFormAssetTypeChange(tab.id)}
-                      className={`py-2 rounded-full text-xs font-medium transition-all ${
+                      className={`py-2 px-2 rounded-xl sm:rounded-full text-xs font-medium transition-all whitespace-nowrap ${
                         editingItem ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
                       } ${
                         formAssetType === tab.id
@@ -1092,7 +1192,7 @@ export function InvestmentsView() {
                     value={formSymbol}
                     disabled={Boolean(editingItem)}
                     onChange={(e) => setFormSymbol(e.target.value.toUpperCase())}
-                    placeholder="เช่น GOLD-THB, BTC-USD, AAPL"
+                    placeholder="เช่น GOLD-THB, USD-THB, AAPL, BTC-USD"
                     required
                     className="w-full px-3.5 py-2.5 rounded-2xl bg-black/[0.04] dark:bg-white/[0.08] border border-black/[0.08] dark:border-white/[0.12] text-sm font-mono-num text-[#1D1D1F] dark:text-white disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-[#0071E3]/40"
                   />
@@ -1149,21 +1249,33 @@ export function InvestmentsView() {
                 </div>
               </div>
 
-              {/* Entry Price per Unit (THB) with Auto-Fetch Button */}
+              {/* Entry Price per Unit (THB) with On-Demand Fetch Buttons */}
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <label className="block text-xs font-medium text-[#6E6E73] dark:text-[#A1A1A6]">
                     ราคาต่อ 1 {getAssetUnitLabel(formSymbol, formAssetType)} ณ วันที่ซื้อ (บาท)
                   </label>
-                  <button
-                    type="button"
-                    disabled={fetchingPrice}
-                    onClick={() => void handleLookupPriceForForm(formSymbol, formPurchaseDate)}
-                    className="inline-flex items-center gap-1 text-xs font-medium text-[#0071E3] dark:text-[#0A84FF] hover:underline disabled:opacity-50 cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${fetchingPrice ? 'animate-spin' : ''}`} />
-                    {fetchingPrice ? 'กำลังดึงราคา...' : 'ดึงราคาตลาดวันนั้น'}
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      disabled={fetchingPrice}
+                      onClick={() => void handleLookupPriceForForm(formSymbol, getTodayISO(), true)}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-[#0071E3] dark:text-[#0A84FF] hover:underline disabled:opacity-50 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${fetchingPrice ? 'animate-spin' : ''}`} />
+                      {fetchingPrice ? 'กำลังดึง...' : 'ดึงราคาตอนนี้'}
+                    </button>
+                    {formPurchaseDate !== getTodayISO() && (
+                      <button
+                        type="button"
+                        disabled={fetchingPrice}
+                        onClick={() => void handleLookupPriceForForm(formSymbol, formPurchaseDate, false)}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-[#6E6E73] dark:text-[#A1A1A6] hover:text-[#0071E3] dark:hover:text-[#0A84FF] hover:underline disabled:opacity-50 cursor-pointer"
+                      >
+                        ดึงราคาวันนั้น
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <input
                   type="number"

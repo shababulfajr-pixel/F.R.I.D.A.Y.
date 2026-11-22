@@ -31,6 +31,7 @@ import {
 import { ensureUserProfile } from '../lib/firestoreService';
 import {
   fetchLiveMarketQuotes,
+  loadCachedMarketMeta,
   loadCachedQuotes,
   saveCachedQuotes,
 } from '../lib/marketApi';
@@ -51,7 +52,7 @@ import {
   type UserProfile,
 } from '../types/finance';
 
-const DEFAULT_WATCHLIST_SYMBOLS = MARKET_CATALOG.slice(0, 12).map((a) => a.symbol);
+const DEFAULT_WATCHLIST_SYMBOLS = MARKET_CATALOG.map((a) => a.symbol);
 
 function toDateOrNull(val: unknown): Date | null {
   if (!val) return null;
@@ -126,9 +127,11 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
   const [marketQuotes, setMarketQuotes] = useState<Record<string, MarketQuote>>(() =>
     loadCachedQuotes()
   );
-  const [usdThbRate, setUsdThbRate] = useState<number>(34.5);
+  const [usdThbRate, setUsdThbRate] = useState<number>(() => loadCachedMarketMeta().usdThbRate);
   const [marketLoading, setMarketLoading] = useState<boolean>(false);
-  const [marketUpdatedAt, setMarketUpdatedAt] = useState<string | null>(null);
+  const [marketUpdatedAt, setMarketUpdatedAt] = useState<string | null>(
+    () => loadCachedMarketMeta().updatedAt
+  );
   const [marketError, setMarketError] = useState<string | null>(null);
 
   const [selectedMonth, setSelectedMonthState] = useState<string>(getCurrentMonthKey);
@@ -498,7 +501,7 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
         new Set([...DEFAULT_WATCHLIST_SYMBOLS, ...heldSymbols, ...extraSymbols])
       );
       if (!isOnline) {
-        setMarketError('โหมดออฟไลน์ · แสดงราคาล่าสุดจากแคช');
+        setMarketError('โหมดออฟไลน์ · แสดงราคาที่ดึงไว้ล่าสุดจากแคช');
         return {};
       }
       setMarketLoading(true);
@@ -509,13 +512,13 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
         setMarketUpdatedAt(res.updatedAt);
         setMarketQuotes((prev) => {
           const merged = { ...prev, ...res.quotes };
-          saveCachedQuotes(merged);
+          saveCachedQuotes(merged, { usdThbRate: res.usdThbRate, updatedAt: res.updatedAt });
           return merged;
         });
         return res.quotes;
       } catch (err) {
         setMarketError(
-          err instanceof Error ? err.message : 'ไม่สามารถอัปเดตราคาตลาดล่าสุดได้ ใช้ราคาล่าสุดจากแคช'
+          err instanceof Error ? err.message : 'ไม่สามารถดึงราคาตลาดได้ ใช้ราคาล่าสุดจากแคช'
         );
         return {};
       } finally {
@@ -525,19 +528,16 @@ export function FinanceProvider({ children }: { children: React.ReactNode }) {
     [isOnline]
   );
 
-  const heldSymbolsKey = useMemo(
-    () => Array.from(new Set(investments.map((i) => i.symbol))).sort().join(','),
-    [investments]
-  );
-
+  // On-demand fetching only (no real-time background polling):
+  // Fetch once automatically only if no cached quotes exist yet; otherwise user presses "ดึงราคาล่าสุด" anytime.
+  const initialSnapshotFetchedRef = useRef(false);
   useEffect(() => {
-    if (!authReady || !user || !isOnline) return;
-    void refreshMarketQuotes();
-    const timer = window.setInterval(() => {
+    if (!authReady || !user || !isOnline || initialSnapshotFetchedRef.current) return;
+    if (Object.keys(marketQuotes).length === 0) {
+      initialSnapshotFetchedRef.current = true;
       void refreshMarketQuotes();
-    }, 180_000);
-    return () => window.clearInterval(timer);
-  }, [authReady, user, isOnline, heldSymbolsKey, refreshMarketQuotes]);
+    }
+  }, [authReady, user, isOnline, marketQuotes, refreshMarketQuotes]);
 
   if (fatalError) {
     throw fatalError;
